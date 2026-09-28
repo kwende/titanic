@@ -1,0 +1,25 @@
+# Blender working/output files
+build/
+*.blend1
+*.blend2
+*.blend@
+*.blend~
+
+# Working renders; curated final images can be committed elsewhere deliberately
+renders/work/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local/source datasets: often huge and/or redistribution-restricted
+data/raw/
+data/processed/
+*.las
+*.laz
+*.tif
+*.tiff
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
