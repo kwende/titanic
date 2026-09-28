@@ -124,8 +124,12 @@ Install Blender, clone the repository, and from the repository root run Blender'
 Windows example:
 
 ```powershell
-& "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --python scripts/bootstrap_scene.py
+$blender = "D:\Program Files\Blender Foundation\Blender 5.2\blender.exe"
+& $blender --background --python scripts/bootstrap_scene.py
 ```
+
+That executable was verified with Blender 5.2.2 LTS on 2026-09-28. Substitute
+the local installation path on another workstation.
 
 macOS example:
 
@@ -145,6 +149,27 @@ The script creates:
 build/titanic-graybox.blend
 build/titanic-graybox.png
 ```
+
+### Lens comparison
+
+To compare composition without changing camera altitude or site geometry:
+
+```powershell
+& $blender --background --python scripts/render_lens_comparison.py
+```
+
+This renders 60, 75, and 90 degree horizontal fields of view to
+`build/titanic-lens-*.png`. The experiment uses one shared, expanded provisional
+terrain mesh so all three frames show the same scene without revealing a mesh
+edge.
+
+To regenerate the large 5120 x 2880 version of the 90-degree view:
+
+```powershell
+& $blender --background --python scripts/render_90_large.py
+```
+
+This writes `build/titanic-90deg-5k.png` and its reproducible `.blend` scene.
 
 You can also open Blender normally and run `scripts/bootstrap_scene.py` from the Scripting workspace.
 

@@ -41,6 +41,18 @@ def clear_scene() -> None:
         if collection.users == 0:
             bpy.data.collections.remove(collection)
 
+    # Comparison scripts rebuild several scenes in one Blender process. Remove
+    # unlinked data so later .blend files contain only their own experiment.
+    for data_blocks in (
+        bpy.data.meshes,
+        bpy.data.materials,
+        bpy.data.cameras,
+        bpy.data.lights,
+    ):
+        for data_block in list(data_blocks):
+            if data_block.users == 0:
+                data_blocks.remove(data_block)
+
 
 def configure_scene(config: dict) -> bpy.types.Scene:
     scene = bpy.context.scene
@@ -54,6 +66,7 @@ def configure_scene(config: dict) -> bpy.types.Scene:
     scene.render.resolution_y = int(render["height_px"])
     scene.render.resolution_percentage = 100
     scene.render.image_settings.file_format = "PNG"
+    scene.render.image_settings.color_mode = "RGBA"
 
     # Eevee is ideal for this first pass: the goal is fast iteration, not final
     # physically based rendering. Blender renamed the engine in newer releases.
@@ -64,14 +77,23 @@ def configure_scene(config: dict) -> bpy.types.Scene:
         except TypeError:
             continue
 
-    # Keep the world dark but not black so the graybox remains readable.
+    # The sample budget is an explicit graybox tradeoff: enough edge/shadow
+    # stability to evaluate the composition without turning this into a final
+    # render pipeline.
+    if hasattr(scene, "eevee"):
+        scene.eevee.taa_render_samples = int(render["samples"])
+
+    scene.view_settings.look = "AgX - Medium High Contrast"
+
+    # Keep the world dark but not black so unlit faces retain enough context.
+    look = config["look"]
     world = scene.world or bpy.data.worlds.new("World")
     scene.world = world
     world.use_nodes = True
     background = world.node_tree.nodes.get("Background")
     if background is not None:
-        background.inputs["Color"].default_value = (0.012, 0.016, 0.020, 1.0)
-        background.inputs["Strength"].default_value = 0.18
+        background.inputs["Color"].default_value = tuple(look["world_color_linear"])
+        background.inputs["Strength"].default_value = float(look["world_strength"])
 
     return scene
 
@@ -86,6 +108,46 @@ def make_material(name: str, rgba: tuple[float, float, float, float], roughness:
         bsdf.inputs["Roughness"].default_value = roughness
 
     material.diffuse_color = rgba
+    return material
+
+
+def make_seabed_material(config: dict) -> bpy.types.Material:
+    """Build restrained, deterministic tonal variation at terrain scale."""
+    look = config["look"]
+    material = bpy.data.materials.new(name="Seabed graybox")
+    material.use_nodes = True
+
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    bsdf = nodes.get("Principled BSDF")
+    if bsdf is None:
+        return material
+
+    texcoord = nodes.new("ShaderNodeTexCoord")
+    texcoord.name = "Terrain coordinates"
+    texcoord.location = (-620.0, 0.0)
+
+    noise = nodes.new("ShaderNodeTexNoise")
+    noise.name = "Provisional broad seabed variation"
+    noise.location = (-400.0, 0.0)
+    noise.noise_dimensions = "3D"
+    noise.inputs["Scale"].default_value = float(look["seabed_noise_scale"])
+    noise.inputs["Detail"].default_value = 3.0
+    noise.inputs["Roughness"].default_value = 0.58
+
+    ramp = nodes.new("ShaderNodeValToRGB")
+    ramp.name = "Restrained seabed values"
+    ramp.location = (-170.0, 0.0)
+    ramp.color_ramp.interpolation = "B_SPLINE"
+    ramp.color_ramp.elements[0].position = 0.24
+    ramp.color_ramp.elements[0].color = tuple(look["seabed_dark_linear"])
+    ramp.color_ramp.elements[1].position = 0.78
+    ramp.color_ramp.elements[1].color = tuple(look["seabed_light_linear"])
+
+    bsdf.inputs["Roughness"].default_value = 0.97
+    links.new(texcoord.outputs["Generated"], noise.inputs["Vector"])
+    links.new(noise.outputs["Fac"], ramp.inputs["Fac"])
+    links.new(ramp.outputs["Color"], bsdf.inputs["Base Color"])
     return material
 
 
@@ -137,6 +199,8 @@ def create_terrain(config: dict, material: bpy.types.Material) -> bpy.types.Obje
     mesh = bpy.data.meshes.new("SeabedMesh")
     mesh.from_pydata(vertices, [], faces)
     mesh.update()
+    for polygon in mesh.polygons:
+        polygon.use_smooth = True
 
     obj = bpy.data.objects.new("Seabed", mesh)
     bpy.context.scene.collection.objects.link(obj)
@@ -147,13 +211,15 @@ def create_terrain(config: dict, material: bpy.types.Material) -> bpy.types.Obje
     return obj
 
 
-def create_box_proxy(
+def create_prism_proxy(
     name: str,
     spec: dict,
     terrain: dict,
     material: bpy.types.Material,
     bevel_m: float,
+    footprint: list[tuple[float, float]],
 ) -> bpy.types.Object:
+    """Create a low-poly wreck prism inside the configured metric bounds."""
     x, y, z_offset = (float(v) for v in spec["center_m"])
     length = float(spec["length_m"])
     beam = float(spec["beam_m"])
@@ -162,16 +228,28 @@ def create_box_proxy(
 
     ground_z = terrain_height(x, y, terrain)
 
-    bpy.ops.mesh.primitive_cube_add(
-        location=(x, y, ground_z + z_offset + height / 2.0),
-        rotation=(0.0, 0.0, heading),
-    )
-    obj = bpy.context.object
-    obj.name = name
-    obj.dimensions = (length, beam, height)
+    count = len(footprint)
+    vertices = [
+        (nx * length, ny * beam, z)
+        for z in (0.0, height)
+        for nx, ny in footprint
+    ]
+    faces: list[tuple[int, ...]] = [
+        tuple(reversed(range(count))),
+        tuple(count + i for i in range(count)),
+    ]
+    for i in range(count):
+        next_i = (i + 1) % count
+        faces.append((i, next_i, count + next_i, count + i))
 
-    # Apply only scale so bevel width is interpreted in meters.
-    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    mesh = bpy.data.meshes.new(f"{name}Mesh")
+    mesh.from_pydata(vertices, [], faces)
+    mesh.update()
+
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    obj.location = (x, y, ground_z + z_offset)
+    obj.rotation_euler = (0.0, 0.0, heading)
 
     bevel = obj.modifiers.new(name="Graybox bevel", type="BEVEL")
     bevel.width = bevel_m
@@ -180,6 +258,7 @@ def create_box_proxy(
     obj.data.materials.append(material)
     obj["provisional"] = True
     obj["heading_deg"] = float(spec["heading_deg"])
+    obj["note"] = "Low-poly silhouette proxy; dimensions and shape remain provisional."
 
     return obj
 
@@ -284,6 +363,54 @@ def point_camera_at(camera: bpy.types.Object, target: Vector) -> None:
     camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
 
 
+def projection_metrics(config: dict) -> dict[str, float]:
+    camera_cfg = config["camera"]
+    render = config["render"]
+
+    altitude = float(camera_cfg["altitude_m"])
+    horizontal_fov = math.radians(float(camera_cfg["horizontal_fov_deg"]))
+    width_px = int(render["width_px"])
+    height_px = int(render["height_px"])
+
+    ground_width = 2.0 * altitude * math.tan(horizontal_fov / 2.0)
+    ground_height = ground_width * height_px / width_px
+    return {
+        "ground_width_m": ground_width,
+        "ground_height_m": ground_height,
+        "meters_per_pixel": ground_width / width_px,
+    }
+
+
+def validate_config(config: dict) -> None:
+    """Reject framing mistakes that would invalidate the visual scale test."""
+    camera = config["camera"]
+    terrain = config["terrain"]
+    debris = config["debris"]
+    metrics = projection_metrics(config)
+
+    altitude = float(camera["altitude_m"])
+    fov_deg = float(camera["horizontal_fov_deg"])
+    if altitude <= 0.0:
+        raise ValueError("camera.altitude_m must be positive")
+    if not 0.0 < fov_deg < 180.0:
+        raise ValueError("camera.horizontal_fov_deg must be between 0 and 180")
+    if int(terrain["grid_resolution"]) < 2:
+        raise ValueError("terrain.grid_resolution must be at least 2")
+
+    if float(terrain["width_m"]) < metrics["ground_width_m"]:
+        raise ValueError("terrain.width_m does not cover the camera's flat-plane view")
+    if float(terrain["depth_m"]) < metrics["ground_height_m"]:
+        raise ValueError("terrain.depth_m does not cover the camera's flat-plane view")
+
+    debris_x, debris_y, _ = (float(v) for v in debris["center_m"])
+    debris_half_width = float(debris["major_axis_m"]) / 2.0
+    debris_half_depth = float(debris["minor_axis_m"]) / 2.0
+    if abs(debris_x) + debris_half_width > float(terrain["width_m"]) / 2.0:
+        raise ValueError("debris major-axis bounds extend beyond the terrain")
+    if abs(debris_y) + debris_half_depth > float(terrain["depth_m"]) / 2.0:
+        raise ValueError("debris minor-axis bounds extend beyond the terrain")
+
+
 def create_camera(config: dict) -> bpy.types.Object:
     camera_cfg = config["camera"]
     terrain = config["terrain"]
@@ -317,20 +444,19 @@ def create_camera(config: dict) -> bpy.types.Object:
     return camera
 
 
-def create_sun() -> bpy.types.Object:
+def create_sun(config: dict) -> bpy.types.Object:
+    lighting = config["lighting"]
     light_data = bpy.data.lights.new(name="GrayboxSun", type="SUN")
-    light_data.energy = 3.0
-    light_data.angle = math.radians(2.0)
+    light_data.energy = float(lighting["energy"])
+    light_data.angle = math.radians(float(lighting["angular_diameter_deg"]))
 
     sun = bpy.data.objects.new(name="GrayboxSun", object_data=light_data)
     bpy.context.scene.collection.objects.link(sun)
 
     # Deliberately low-ish directional light to make meter-scale relief legible.
     # This is an art-direction hypothesis, not a factual environmental claim.
-    sun.rotation_euler = (
-        math.radians(58.0),
-        math.radians(-18.0),
-        math.radians(32.0),
+    sun.rotation_euler = tuple(
+        math.radians(float(degrees)) for degrees in lighting["rotation_deg"]
     )
     sun["provisional"] = True
 
@@ -339,45 +465,58 @@ def create_sun() -> bpy.types.Object:
 
 def report_projection(config: dict) -> None:
     camera_cfg = config["camera"]
-    render = config["render"]
+    wreck = config["wreck"]
+    debris = config["debris"]
 
     altitude = float(camera_cfg["altitude_m"])
     horizontal_fov = math.radians(float(camera_cfg["horizontal_fov_deg"]))
-    width_px = int(render["width_px"])
+    metrics = projection_metrics(config)
+    meters_per_pixel = metrics["meters_per_pixel"]
 
-    ground_width = 2.0 * altitude * math.tan(horizontal_fov / 2.0)
-    meters_per_pixel = ground_width / width_px
+    bow_x, bow_y, _ = (float(v) for v in wreck["bow"]["center_m"])
+    stern_x, stern_y, _ = (float(v) for v in wreck["stern"]["center_m"])
+    wreck_separation = math.hypot(stern_x - bow_x, stern_y - bow_y)
 
     print("")
     print("=== Titanic graybox projection ===")
     print(f"Camera altitude:       {altitude:,.2f} m")
     print(f"Horizontal FOV:        {math.degrees(horizontal_fov):.2f} deg")
-    print(f"Flat ground coverage:  {ground_width:,.1f} m")
+    print(
+        "Flat ground coverage:  "
+        f"{metrics['ground_width_m']:,.1f} x {metrics['ground_height_m']:,.1f} m"
+    )
     print(f"Center rule-of-thumb:  {meters_per_pixel:.2f} m/px")
+    print(
+        "Bow proxy length:      "
+        f"{float(wreck['bow']['length_m']) / meters_per_pixel:.1f} px"
+    )
+    print(f"Wreck-center spacing:  {wreck_separation / meters_per_pixel:.1f} px")
+    print(
+        "Debris footprint:      "
+        f"{float(debris['major_axis_m']) / meters_per_pixel:.1f} x "
+        f"{float(debris['minor_axis_m']) / meters_per_pixel:.1f} px"
+    )
+    print("Configuration checks:  PASS")
     print("==================================")
     print("")
 
 
-def main() -> None:
-    config = load_config()
-    BUILD_DIR.mkdir(parents=True, exist_ok=True)
-
+def build_scene(config: dict) -> bpy.types.Scene:
+    """Construct one complete graybox scene from an already-derived config."""
+    validate_config(config)
     clear_scene()
     scene = configure_scene(config)
 
-    seabed_material = make_material(
-        "Seabed graybox",
-        (0.095, 0.105, 0.105, 1.0),
-        roughness=0.96,
-    )
+    look = config["look"]
+    seabed_material = make_seabed_material(config)
     wreck_material = make_material(
         "Wreck graybox",
-        (0.18, 0.16, 0.135, 1.0),
+        tuple(look["wreck_color_linear"]),
         roughness=0.86,
     )
     debris_material = make_material(
         "Debris graybox",
-        (0.13, 0.115, 0.095, 1.0),
+        tuple(look["debris_color_linear"]),
         roughness=0.90,
     )
 
@@ -386,29 +525,39 @@ def main() -> None:
     wreck = config["wreck"]
     terrain = config["terrain"]
 
-    create_box_proxy(
+    create_prism_proxy(
         "Bow proxy",
         wreck["bow"],
         terrain,
         wreck_material,
-        bevel_m=4.0,
+        bevel_m=2.0,
+        # Flat break at -X; a simple pointed bow at +X.
+        footprint=[(-0.5, -0.5), (0.18, -0.5), (0.5, 0.0), (0.18, 0.5), (-0.5, 0.5)],
     )
-    create_box_proxy(
+    create_prism_proxy(
         "Stern proxy",
         wreck["stern"],
         terrain,
         wreck_material,
-        bevel_m=5.0,
+        bevel_m=3.0,
+        # Asymmetry distinguishes the damaged stern without pretending to model it.
+        footprint=[(-0.5, -0.5), (0.5, -0.5), (0.42, 0.36), (0.10, 0.5), (-0.5, 0.30)],
     )
 
     create_debris(config, debris_material)
     create_camera(config)
-    create_sun()
+    create_sun(config)
 
     report_projection(config)
+    return scene
 
-    blend_path = BUILD_DIR / "titanic-graybox.blend"
-    render_path = BUILD_DIR / "titanic-graybox.png"
+
+def save_and_render(scene: bpy.types.Scene, output_stem: str) -> tuple[Path, Path]:
+    """Save a reproducible scene and render using a shared output stem."""
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+
+    blend_path = BUILD_DIR / f"{output_stem}.blend"
+    render_path = BUILD_DIR / f"{output_stem}.png"
 
     scene.render.filepath = str(render_path)
 
@@ -417,6 +566,13 @@ def main() -> None:
 
     print(f"Saved Blender scene: {blend_path}")
     print(f"Saved graybox render: {render_path}")
+    return blend_path, render_path
+
+
+def main() -> None:
+    config = load_config()
+    scene = build_scene(config)
+    save_and_render(scene, "titanic-graybox")
 
 
 if __name__ == "__main__":

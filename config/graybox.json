@@ -10,6 +10,22 @@
     "height_px": 1440,
     "samples": 64
   },
+  "look": {
+    "_warning": "Graybox art direction only. These values improve legibility and are not environmental measurements.",
+    "world_color_linear": [0.004, 0.007, 0.009, 1.0],
+    "world_strength": 0.08,
+    "seabed_dark_linear": [0.018, 0.024, 0.025, 1.0],
+    "seabed_light_linear": [0.070, 0.082, 0.080, 1.0],
+    "seabed_noise_scale": 7.0,
+    "wreck_color_linear": [0.24, 0.105, 0.040, 1.0],
+    "debris_color_linear": [0.16, 0.065, 0.024, 1.0]
+  },
+  "lighting": {
+    "_warning": "Provisional directional-light art direction, not a claim about the wreck environment.",
+    "energy": 4.0,
+    "angular_diameter_deg": 1.5,
+    "rotation_deg": [67.0, -16.0, 32.0]
+  },
   "terrain": {
     "width_m": 6000.0,
     "depth_m": 6000.0,
