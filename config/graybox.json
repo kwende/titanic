@@ -1,0 +1,44 @@
+{
+  "_warning": "GRAYBOX ONLY. Values other than the camera altitude are provisional visualization scaffolding, not archaeological claims.",
+  "camera": {
+    "altitude_m": 4023.36,
+    "horizontal_fov_deg": 60.0,
+    "target_m": [0.0, 0.0, 0.0]
+  },
+  "render": {
+    "width_px": 2560,
+    "height_px": 1440,
+    "samples": 64
+  },
+  "terrain": {
+    "width_m": 6000.0,
+    "depth_m": 6000.0,
+    "grid_resolution": 121,
+    "relief_amplitude_m": 12.0,
+    "slope_x": 0.0012,
+    "slope_y": -0.0008
+  },
+  "wreck": {
+    "bow": {
+      "center_m": [-75.0, -300.0, 0.0],
+      "length_m": 140.0,
+      "beam_m": 30.0,
+      "height_m": 18.0,
+      "heading_deg": 20.0
+    },
+    "stern": {
+      "center_m": [75.0, 300.0, 0.0],
+      "length_m": 105.0,
+      "beam_m": 36.0,
+      "height_m": 22.0,
+      "heading_deg": 105.0
+    }
+  },
+  "debris": {
+    "center_m": [0.0, 0.0, 0.0],
+    "major_axis_m": 1200.0,
+    "minor_axis_m": 700.0,
+    "count": 320,
+    "seed": 1912
+  }
+}
